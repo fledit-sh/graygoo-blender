@@ -274,8 +274,8 @@ def make_brushed_aluminum_material(name):
     tint.location = (410, 250)
 
     # Large-scale directionality establishes the brushed read, while the subtle noise prevents CG-flatness.
-    mapping.inputs[3].default_value = (0.0, 0.0, math.radians(90.0))
-    mapping.inputs[4].default_value = (32.0, 4.5, 4.5)
+    set_socket_value(mapping, ("Rotation",), (0.0, 0.0, math.radians(90.0)))
+    set_socket_value(mapping, ("Scale",), (32.0, 4.5, 4.5))
 
     wave.wave_type = "BANDS"
     wave.bands_direction = "X"
@@ -388,7 +388,7 @@ def make_black_satin_plastic_material(name):
     edge_rgb.location = (-80, 240)
     color_mix.location = (160, 250)
 
-    mapping.inputs[4].default_value = (11.0, 11.0, 11.0)
+    set_socket_value(mapping, ("Scale",), (11.0, 11.0, 11.0))
 
     primary_noise.inputs[2].default_value = 8.0
     primary_noise.inputs[3].default_value = 2.0
@@ -538,8 +538,8 @@ def make_reflection_floor_material(name):
     rough_ramp.location = (150, 80)
 
     gradient.gradient_type = "SPHERICAL"
-    mapping.inputs[1].default_value = (-0.5, -0.5, 0.0)
-    mapping.inputs[4].default_value = (0.65, 1.55, 1.0)
+    set_socket_value(mapping, ("Location",), (-0.5, -0.5, 0.0))
+    set_socket_value(mapping, ("Scale",), (0.65, 1.55, 1.0))
 
     floor_strength = clamp(REFLECTION_FLOOR_STRENGTH, 0.0, 1.0)
     ramp.color_ramp.elements[0].position = 0.12
