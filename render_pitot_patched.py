@@ -26,7 +26,7 @@ from mathutils import Vector
 # ══════════════════════════════════════════════════════════════
 
 # Leave empty for automatic path detection relative to the script /.blend file.
-MANUAL_PARTS_DIR = ""
+MANUAL_PARTS_DIR = r"C:\Users\NoelErnstingLuz\PycharmProjects\graygoo-blender"
 
 # Quality mode toggle kept simple for script-only workflows.
 PREVIEW_MODE = True
