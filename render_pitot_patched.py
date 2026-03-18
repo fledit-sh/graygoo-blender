@@ -1,416 +1,599 @@
 """
 Pitot Tube Studio Rendering Script
-====================================
+=================================
 UBIQ Aerospace – ADS Pitot Tube (02000)
 
+Blender-5-freundliche Produktvisualisierung mit Exploded View.
+
 SETUP:
-  1. MANUAL_PARTS_DIR unten anpassen
-  2. PREVIEW_MODE = True  → schnelles Testbild (960x540, 24 Samples, ~30 Sek.)
-     PREVIEW_MODE = False → finales Rendering (2560x1440, 256 Samples)
-  3. In Blender: Scripting-Tab → Script laden → Alt+P
-  4. System Console öffnen (Window → Toggle System Console) → Logs lesen!
+  1. Script in Blender 5 im Scripting-Tab laden
+  2. Optional MANUAL_PARTS_DIR unten setzen
+  3. Alt+P drücken
+  4. System Console öffnen, um die Logs zu sehen
 """
 
 import bpy
-import os
 import math
+import os
 from mathutils import Vector
+
 
 # ══════════════════════════════════════════════════════════════
 #  ▶▶ EINSTELLUNGEN ◀◀
 # ══════════════════════════════════════════════════════════════
 
-MANUAL_PARTS_DIR = r"C:\Users\Noel\PycharmProjects\graygoo-blender"
+# Leer lassen für automatische Pfaderkennung relativ zum Script/.blend.
+MANUAL_PARTS_DIR = ""
 
-PREVIEW_MODE = True   # True = schnell testen  |  False = finales Rendering
+PREVIEW_MODE = True
+USE_EXPLODED_VIEW = True
+EXPLODE_AXIS = "X"
+EXPLODE_GAP = 0.028  # Meter nach STL-Import (global_scale=0.001)
 
-# ══════════════════════════════════════════════════════════════
+BACKGROUND_COLOR = (0.012, 0.012, 0.014, 1.0)
+GROUND_COLOR = (0.018, 0.018, 0.020, 1.0)
+
 
 if PREVIEW_MODE:
-    RENDER_WIDTH, RENDER_HEIGHT, RENDER_SAMPLES, OUTPUT_SUFFIX = 960, 540, 24, "_preview"
+    RENDER_WIDTH, RENDER_HEIGHT, RENDER_SAMPLES, OUTPUT_SUFFIX = 1280, 720, 48, "_preview"
 else:
-    RENDER_WIDTH, RENDER_HEIGHT, RENDER_SAMPLES, OUTPUT_SUFFIX = 2560, 1440, 256, ""
+    RENDER_WIDTH, RENDER_HEIGHT, RENDER_SAMPLES, OUTPUT_SUFFIX = 2560, 1440, 320, ""
+
 
 PARTS = [
-    ("00_total_pressure_port.stl", "aluminum",    "Total Pressure Port"),
-    ("01_main_housing.stl",        "black_paint", "Pitot Tube Cover"),
-    ("02_base_plate.stl",          "black_paint", "Pitot Tube Base"),
-    ("03_static_port.stl",         "aluminum",    "Static Ports"),
-    ("04_fitting.stl",             "aluminum",    "Port Fitting"),
+    ("00_total_pressure_port.stl", "aluminum_dark", "Total Pressure Port"),
+    ("01_main_housing.stl", "black_satin", "Pitot Tube Cover"),
+    ("02_base_plate.stl", "black_satin", "Pitot Tube Base"),
+    ("03_static_port.stl", "aluminum", "Static Ports"),
+    ("04_fitting.stl", "aluminum", "Port Fitting"),
 ]
 
 
 # ── Pfad-Ermittlung ──────────────────────────────────────────
 
-def get_parts_dir():
-    if MANUAL_PARTS_DIR:
-        c = os.path.join(MANUAL_PARTS_DIR, "parts_obj")
-        if os.path.isdir(c):
-            return c
-        if os.path.isdir(MANUAL_PARTS_DIR):
-            return MANUAL_PARTS_DIR
+def get_script_directory():
     try:
-        c = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parts_obj")
-        if os.path.isdir(c):
-            return c
+        return os.path.dirname(os.path.abspath(__file__))
     except NameError:
         pass
+
     for text in bpy.data.texts:
         if text.filepath:
-            c = os.path.join(os.path.dirname(bpy.path.abspath(text.filepath)), "parts_obj")
-            if os.path.isdir(c):
-                return c
+            return os.path.dirname(bpy.path.abspath(text.filepath))
+
     if bpy.data.filepath:
-        c = os.path.join(os.path.dirname(bpy.data.filepath), "parts_obj")
-        if os.path.isdir(c):
-            return c
+        return os.path.dirname(bpy.data.filepath)
+
+    return os.getcwd()
+
+
+def get_parts_dir():
+    candidates = []
+
+    if MANUAL_PARTS_DIR:
+        candidates.extend(
+            [
+                os.path.join(MANUAL_PARTS_DIR, "parts_obj"),
+                MANUAL_PARTS_DIR,
+            ]
+        )
+
+    script_dir = get_script_directory()
+    candidates.extend(
+        [
+            os.path.join(script_dir, "parts_obj"),
+            script_dir,
+        ]
+    )
+
+    if bpy.data.filepath:
+        blend_dir = os.path.dirname(bpy.data.filepath)
+        candidates.extend(
+            [
+                os.path.join(blend_dir, "parts_obj"),
+                blend_dir,
+            ]
+        )
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = os.path.normpath(candidate)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if not os.path.isdir(candidate):
+            continue
+        filenames = {entry.lower() for entry in os.listdir(candidate)}
+        if "parts_obj" not in os.path.basename(candidate).lower():
+            nested = os.path.join(candidate, "parts_obj")
+            if os.path.isdir(nested):
+                nested_names = {entry.lower() for entry in os.listdir(nested)}
+                if "00_total_pressure_port.stl" in nested_names:
+                    return nested
+        if "00_total_pressure_port.stl" in filenames:
+            return candidate
+
     return None
+
+
+# ── Utility ──────────────────────────────────────────────────
+
+def socket(node, *names):
+    for name in names:
+        if name in node.inputs:
+            return node.inputs[name]
+    return None
+
+
+def clear_node_tree(node_tree):
+    for node in list(node_tree.nodes):
+        node_tree.nodes.remove(node)
+
+
+def object_bounds_world(obj):
+    corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    xs = [co.x for co in corners]
+    ys = [co.y for co in corners]
+    zs = [co.z for co in corners]
+    return (
+        Vector((min(xs), min(ys), min(zs))),
+        Vector((max(xs), max(ys), max(zs))),
+    )
+
+
+def object_dimensions_local(obj):
+    corners = [Vector(corner) for corner in obj.bound_box]
+    mins = Vector((min(c[i] for c in corners) for i in range(3)))
+    maxs = Vector((max(c[i] for c in corners) for i in range(3)))
+    center = (mins + maxs) * 0.5
+    size = maxs - mins
+    return center, size
+
+
+def ensure_object_mode():
+    active = bpy.context.active_object
+    if active and active.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
 
 
 # ── Materialien ──────────────────────────────────────────────
 
-def make_material(name, base_color, metallic, roughness, coat=0.0, coat_roughness=0.05):
+def make_principled_material(
+    name,
+    base_color,
+    metallic,
+    roughness,
+    coat=0.0,
+    coat_roughness=0.03,
+    specular_ior=1.5,
+):
     mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
     nt = mat.node_tree
-    nt.nodes.clear()
-    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    clear_node_tree(nt)
+
+    output = nt.nodes.new("ShaderNodeOutputMaterial")
     bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
-    out.location = (300, 0)
+
+    output.location = (320, 0)
     bsdf.location = (0, 0)
-    bsdf.inputs["Base Color"].default_value = base_color
-    bsdf.inputs["Metallic"].default_value = metallic
-    bsdf.inputs["Roughness"].default_value = roughness
-    for key in ("Coat Weight", "Clearcoat"):
-        if key in bsdf.inputs:
-            bsdf.inputs[key].default_value = coat
-            break
-    for key in ("Coat Roughness", "Clearcoat Roughness"):
-        if key in bsdf.inputs:
-            bsdf.inputs[key].default_value = coat_roughness
-            break
-    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+
+    socket(bsdf, "Base Color").default_value = base_color
+    socket(bsdf, "Metallic").default_value = metallic
+    socket(bsdf, "Roughness").default_value = roughness
+
+    coat_socket = socket(bsdf, "Coat Weight", "Clearcoat")
+    if coat_socket:
+        coat_socket.default_value = coat
+
+    coat_roughness_socket = socket(bsdf, "Coat Roughness", "Clearcoat Roughness")
+    if coat_roughness_socket:
+        coat_roughness_socket.default_value = coat_roughness
+
+    specular_socket = socket(bsdf, "Specular IOR Level", "Specular")
+    if specular_socket:
+        specular_socket.default_value = specular_ior
+
+    nt.links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
     return mat
+
+
+def build_materials():
+    return {
+        "aluminum": make_principled_material(
+            "MAT_Aluminum",
+            base_color=(0.79, 0.80, 0.82, 1.0),
+            metallic=1.0,
+            roughness=0.14,
+            coat=0.08,
+            coat_roughness=0.02,
+        ),
+        "aluminum_dark": make_principled_material(
+            "MAT_AluminumDark",
+            base_color=(0.63, 0.64, 0.67, 1.0),
+            metallic=1.0,
+            roughness=0.18,
+            coat=0.06,
+            coat_roughness=0.04,
+        ),
+        "black_satin": make_principled_material(
+            "MAT_BlackSatin",
+            base_color=(0.018, 0.018, 0.020, 1.0),
+            metallic=0.02,
+            roughness=0.42,
+            coat=0.18,
+            coat_roughness=0.12,
+            specular_ior=1.3,
+        ),
+    }
 
 
 # ── Import ───────────────────────────────────────────────────
 
 def import_stl(filepath):
-    bpy.ops.object.select_all(action='DESELECT')
-    for op in (
-        lambda: bpy.ops.wm.stl_import(filepath=filepath, global_scale=0.001),
-        lambda: bpy.ops.import_mesh.stl(filepath=filepath, global_scale=0.001),
-    ):
+    bpy.ops.object.select_all(action="DESELECT")
+
+    operators = []
+    if hasattr(bpy.ops.wm, "stl_import"):
+        operators.append(lambda: bpy.ops.wm.stl_import(filepath=filepath, global_scale=0.001))
+    if hasattr(bpy.ops.import_mesh, "stl"):
+        operators.append(lambda: bpy.ops.import_mesh.stl(filepath=filepath, global_scale=0.001))
+
+    for operation in operators:
         try:
-            op()
-            sel = bpy.context.selected_objects
-            return sel[0] if sel else None
-        except Exception:
-            continue
-    print(f"    STL-Import fehlgeschlagen: {filepath}")
+            operation()
+            selected = [obj for obj in bpy.context.selected_objects if obj.type == "MESH"]
+            return selected[0] if selected else None
+        except Exception as exc:
+            print(f"    [WARN] STL-Import-Operator fehlgeschlagen: {exc}")
+
+    print(f"    [FEHLER] STL-Import fehlgeschlagen: {filepath}")
     return None
 
 
-# ── World: garantiert dunkel ─────────────────────────────────
+def smooth_object(obj):
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    try:
+        bpy.ops.object.shade_auto_smooth(angle=math.radians(35))
+    except Exception:
+        try:
+            bpy.ops.object.shade_smooth()
+        except Exception:
+            pass
+    obj.select_set(False)
+
+
+# ── Szene ────────────────────────────────────────────────────
+
+def cleanup_scene():
+    ensure_object_mode()
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
+
+    datablocks = (
+        bpy.data.meshes,
+        bpy.data.materials,
+        bpy.data.cameras,
+        bpy.data.lights,
+        bpy.data.curves,
+    )
+    for blocks in datablocks:
+        for block in list(blocks):
+            if block.users == 0:
+                blocks.remove(block)
+
 
 def setup_world():
-    """
-    Modifiziert die bestehende aktive World direkt.
-    Schwarz als Weltfarbe + geringe/intuitive Strength für sauberen schwarzen Background.
-    """
     scene = bpy.context.scene
-
     if scene.world is None:
-        scene.world = bpy.data.worlds.new("World")
-    w = scene.world
-    w.use_nodes = True
+        scene.world = bpy.data.worlds.new("StudioWorld")
 
-    nt = w.node_tree
+    world = scene.world
+    world.use_nodes = True
+    nt = world.node_tree
+    clear_node_tree(nt)
 
-    bg_node = next((n for n in nt.nodes if n.type == 'BACKGROUND'), None)
-    out_node = next((n for n in nt.nodes if n.type == 'OUTPUT_WORLD'), None)
+    output = nt.nodes.new("ShaderNodeOutputWorld")
+    background = nt.nodes.new("ShaderNodeBackground")
 
-    if bg_node is None or out_node is None:
-        nt.nodes.clear()
-        bg_node = nt.nodes.new("ShaderNodeBackground")
-        out_node = nt.nodes.new("ShaderNodeOutputWorld")
-        bg_node.location = (0, 0)
-        out_node.location = (250, 0)
-        nt.links.new(bg_node.outputs[0], out_node.inputs[0])
+    output.location = (240, 0)
+    background.location = (0, 0)
 
-    # Schwarzer Hintergrund. Strength > 0 ist robuster als 0.0 in manchen Setups.
-    bg_node.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)
-    bg_node.inputs[1].default_value = 1.0
+    background.inputs["Color"].default_value = BACKGROUND_COLOR
+    background.inputs["Strength"].default_value = 0.9
+    nt.links.new(background.outputs["Background"], output.inputs["Surface"])
 
-    print(f"  [World] '{w.name}'  Strength={bg_node.inputs[1].default_value}  (schwarzer Hintergrund aktiv)")
+    print(f"  [World] Hintergrund gesetzt: {BACKGROUND_COLOR}")
 
 
-# ── Beleuchtung ──────────────────────────────────────────────
+def add_area_light(name, location, rotation, energy, size, color):
+    bpy.ops.object.light_add(type="AREA", location=location, rotation=rotation)
+    obj = bpy.context.object
+    obj.name = name
+    obj.data.energy = energy
+    obj.data.size = size
+    obj.data.color = color
+    return obj
 
-def setup_lighting(cx=0.0, cy=0.0, cz=0.0, diag=0.3):
-    """
-    Positioniert Lichter relativ zur Modell-Bounding-Box.
-    Funktioniert unabhängig von der Modellgröße.
-    """
+
+def setup_lighting(cx, cy, cz, span):
     setup_world()
+    d = max(span, 0.08)
 
-    d = max(diag, 0.01)
+    add_area_light(
+        "Key Light",
+        (cx + d * 1.20, cy - d * 1.25, cz + d * 0.95),
+        (math.radians(58), 0.0, math.radians(-34)),
+        energy=3200 if PREVIEW_MODE else 4500,
+        size=d * 0.62,
+        color=(1.0, 0.975, 0.94),
+    )
+    add_area_light(
+        "Fill Light",
+        (cx - d * 1.35, cy - d * 0.55, cz + d * 0.32),
+        (math.radians(84), 0.0, math.radians(58)),
+        energy=600 if PREVIEW_MODE else 900,
+        size=d * 1.20,
+        color=(0.82, 0.89, 1.0),
+    )
+    add_area_light(
+        "Rim Light",
+        (cx + d * 0.20, cy + d * 1.35, cz + d * 1.12),
+        (math.radians(-54), 0.0, math.radians(8)),
+        energy=1400 if PREVIEW_MODE else 1800,
+        size=d * 0.55,
+        color=(1.0, 1.0, 1.0),
+    )
+    print(f"  [Light] Studio-Lichter erstellt, span={span:.4f}m")
 
-    lights = [
-        (
-            "Key", 'AREA',
-            (cx + d * 1.1, cy - d * 0.4, cz + d * 1.0),
-            (math.radians(60), 0, math.radians(-55)),
-            650, d * 0.4, (1.00, 0.96, 0.90),
-        ),
-        (
-            "Fill", 'AREA',
-            (cx - d * 0.6, cy - d * 0.5, cz + d * 0.3),
-            (math.radians(18), 0, math.radians(55)),
-            3, d * 1.5, (0.85, 0.90, 1.00),
-        ),
-        (
-            "Rim", 'AREA',
-            (cx - d * 0.1, cy + d * 1.0, cz + d * 1.0),
-            (math.radians(-60), 0, math.radians(8)),
-            80, d * 0.3, (1.00, 1.00, 1.00),
-        ),
-    ]
-    for name, ltype, loc, rot, energy, size, color in lights:
-        bpy.ops.object.light_add(type=ltype, location=loc)
-        l = bpy.context.object
-        l.name = f"Light_{name}"
-        l.rotation_euler = rot
-        l.data.energy = energy
-        l.data.size = size
-        l.data.color = color
-        print(f"  [Light] {name}: {energy}W @ {loc}  size={size:.4f}")
-
-
-# ── Kamera & Boden ───────────────────────────────────────────
 
 def compute_bounds(objects):
-    """Berechnet Bounding-Box aller importierten Objekte."""
-    all_co = []
+    mins = []
+    maxs = []
     for obj in objects:
-        for v in obj.data.vertices:
-            all_co.append(obj.matrix_world @ v.co)
-    if not all_co:
+        obj_min, obj_max = object_bounds_world(obj)
+        mins.append(obj_min)
+        maxs.append(obj_max)
+
+    if not mins:
         return None
-    xs = [c.x for c in all_co]
-    ys = [c.y for c in all_co]
-    zs = [c.z for c in all_co]
-    xmin, xmax = min(xs), max(xs)
-    ymin, ymax = min(ys), max(ys)
-    zmin, zmax = min(zs), max(zs)
-    cx = (xmin + xmax) / 2
-    cy = (ymin + ymax) / 2
-    cz = (zmin + zmax) / 2
-    diag = math.sqrt((xmax - xmin) ** 2 + (ymax - ymin) ** 2 + (zmax - zmin) ** 2)
-    print(f"  [Bounds] cx={cx:.4f} cy={cy:.4f} cz={cz:.4f}  diag={diag:.4f}m")
-    return cx, cy, cz, diag, zmin
+
+    min_corner = Vector((min(v.x for v in mins), min(v.y for v in mins), min(v.z for v in mins)))
+    max_corner = Vector((max(v.x for v in maxs), max(v.y for v in maxs), max(v.z for v in maxs)))
+
+    center = (min_corner + max_corner) * 0.5
+    size = max_corner - min_corner
+    diag = size.length
+
+    print(
+        "  [Bounds] center=(%.4f, %.4f, %.4f) size=(%.4f, %.4f, %.4f) diag=%.4f"
+        % (center.x, center.y, center.z, size.x, size.y, size.z, diag)
+    )
+    return center, size, min_corner, max_corner
 
 
-def setup_camera(cx, cy, cz, diag, zmin):
-    dx = diag * 0.5
-    dz = diag * 0.3
-    look_at = Vector((cx - dx * 0.25, cy, cz - dz * 0.10))
+def layout_exploded(objects, axis="X", gap=0.03):
+    axis_index = "XYZ".index(axis.upper())
+    spans = []
+    for obj in objects:
+        local_center, local_size = object_dimensions_local(obj)
+        spans.append((obj, local_center, local_size[axis_index]))
 
-    dist = diag * 2.5
-    cam_pos = look_at + Vector((-dist * 0.42, -dist * 0.88, dist * 0.38))
+    total_span = sum(span for _, _, span in spans) + gap * max(len(spans) - 1, 0)
+    cursor = -total_span * 0.5
+
+    for obj, local_center, span in spans:
+        target_center = cursor + span * 0.5
+        current_center = obj.location[axis_index] + local_center[axis_index]
+        obj.location[axis_index] += target_center - current_center
+        cursor += span + gap
+        print(f"  [Explode] {obj.name:<22} -> {axis}={obj.location[axis_index]:.4f}")
+
+
+def setup_camera(bounds):
+    center, size, min_corner, max_corner = bounds
+    span = max(size.x, size.y, size.z, 0.08)
+    look_at = Vector(
+        (
+            center.x - size.x * 0.08,
+            center.y + size.y * 0.02,
+            center.z + size.z * 0.03,
+        )
+    )
+    distance = span * 3.35
+    cam_pos = look_at + Vector((-distance * 0.55, -distance * 1.00, distance * 0.36))
 
     bpy.ops.object.camera_add(location=cam_pos)
     cam = bpy.context.object
     cam.name = "PitotCamera"
-    cam.rotation_euler = (look_at - cam_pos).to_track_quat('-Z', 'Y').to_euler()
-    cam.data.lens = 85
-    bpy.context.scene.camera = cam
-    print(f"  [Camera] dist={dist:.3f}  look_at={look_at[:]}")
+    cam.rotation_euler = (look_at - cam_pos).to_track_quat("-Z", "Y").to_euler()
+    cam.data.lens = 72 if PREVIEW_MODE else 85
+    cam.data.clip_start = 0.001
+    cam.data.clip_end = 1000
 
-    ground_size = max(diag * 20, 0.5)
-    bpy.ops.mesh.primitive_plane_add(size=ground_size, location=(cx, cy, zmin - diag * 0.001))
+    scene = bpy.context.scene
+    scene.camera = cam
+
+    ground_size = max(size.x, size.y) * 2.6 + 0.25
+    ground_z = min_corner.z - max(size.z * 0.05, 0.003)
+    bpy.ops.mesh.primitive_plane_add(size=ground_size, location=(center.x, center.y, ground_z))
     ground = bpy.context.object
     ground.name = "StudioGround"
-    ground.data.materials.append(make_material(
-        "MAT_Ground",
-        base_color=(0.008, 0.008, 0.010, 1.0),
-        metallic=0.0,
-        roughness=0.08,
-    ))
-    print(f"  [Ground] size={ground_size:.4f}m @ z={zmin:.4f}")
+    ground.data.materials.append(
+        make_principled_material(
+            "MAT_Ground",
+            base_color=GROUND_COLOR,
+            metallic=0.0,
+            roughness=0.25,
+            coat=0.05,
+            coat_roughness=0.08,
+            specular_ior=1.4,
+        )
+    )
+
+    print(f"  [Camera] lens={cam.data.lens}mm dist={distance:.4f}")
+    print(f"  [Ground] size={ground_size:.4f} z={ground_z:.4f}")
 
 
 # ── Render-Setup ─────────────────────────────────────────────
 
+def setup_cycles_devices(scene):
+    preferences = bpy.context.preferences
+    cycles_addon = preferences.addons.get("cycles")
+    if cycles_addon is None:
+        scene.cycles.device = "CPU"
+        print("  [GPU] Cycles-Addon nicht gefunden -> CPU")
+        return
+
+    cprefs = cycles_addon.preferences
+    for device_type in ("OPTIX", "CUDA", "HIP", "METAL", "ONEAPI"):
+        try:
+            cprefs.compute_device_type = device_type
+            refresh = getattr(cprefs, "refresh_devices", None)
+            if refresh:
+                refresh()
+            elif hasattr(cprefs, "get_devices"):
+                cprefs.get_devices()
+
+            if not getattr(cprefs, "devices", None):
+                continue
+
+            for device in cprefs.devices:
+                device.use = True
+
+            scene.cycles.device = "GPU"
+            print(f"  [GPU] Verwende {device_type}")
+            return
+        except Exception as exc:
+            print(f"  [GPU] {device_type} nicht nutzbar: {exc}")
+
+    scene.cycles.device = "CPU"
+    print("  [GPU] Keine GPU verfügbar -> CPU")
+
+
 def setup_render(render_out):
     scene = bpy.context.scene
-    scene.render.engine = 'CYCLES'
+    scene.render.engine = "CYCLES"
     scene.render.resolution_x = RENDER_WIDTH
     scene.render.resolution_y = RENDER_HEIGHT
+    scene.render.resolution_percentage = 100
     scene.render.filepath = render_out
-    scene.render.image_settings.file_format = 'PNG'
-    scene.cycles.samples = RENDER_SAMPLES
-    scene.cycles.use_denoising = True
-
-    # GPU
-    if not PREVIEW_MODE:
-        gpu_set = False
-        for device_type in ('OPTIX', 'CUDA', 'HIP', 'METAL', 'ONEAPI'):
-            try:
-                cp = bpy.context.preferences.addons['cycles'].preferences
-                cp.compute_device_type = device_type
-                try:
-                    cp.refresh_devices()
-                except Exception:
-                    cp.get_devices()
-                for d in cp.devices:
-                    d.use = True
-                scene.cycles.device = 'GPU'
-                print(f"  GPU: {device_type}")
-                gpu_set = True
-                break
-            except Exception:
-                continue
-        if not gpu_set:
-            scene.cycles.device = 'CPU'
-    else:
-        scene.cycles.device = 'CPU'
-
-    # Kein Compositor-Zwang: schwarzer Hintergrund direkt über World.
-    # Das vermeidet Fehler wie: AttributeError: 'Scene' object has no attribute 'node_tree'
+    scene.render.image_settings.file_format = "PNG"
     scene.render.film_transparent = False
-    print("  [Render] Schwarzer Hintergrund über World konfiguriert (ohne Compositor)")
 
-    cm = scene.view_settings
+    scene.cycles.samples = RENDER_SAMPLES
+    scene.cycles.preview_samples = min(RENDER_SAMPLES, 64)
+    scene.cycles.use_denoising = True
+    scene.cycles.max_bounces = 12
+    scene.cycles.diffuse_bounces = 4
+    scene.cycles.glossy_bounces = 6
+    scene.cycles.transmission_bounces = 8
+    scene.cycles.transparent_max_bounces = 8
 
-    try:
-        vt_options = [i.identifier for i in cm.bl_rna.properties['view_transform'].enum_items]
-        print(f"  [CM] View Transforms verfügbar: {vt_options}")
-    except Exception:
-        vt_options = []
+    if PREVIEW_MODE:
+        scene.cycles.device = "CPU"
+        print("  [Render] Preview -> CPU für reproduzierbares Test-Setup")
+    else:
+        setup_cycles_devices(scene)
 
-    for vt in ('AgX', 'Filmic', 'Standard'):
-        if not vt_options or vt in vt_options:
-            try:
-                cm.view_transform = vt
-                print(f"  [CM] View Transform: {vt}")
-                break
-            except Exception:
-                continue
-
-    try:
-        look_options = [i.identifier for i in cm.bl_rna.properties['look'].enum_items]
-        print(f"  [CM] Looks verfügbar: {look_options}")
-    except Exception:
-        look_options = []
+    view_settings = scene.view_settings
+    for transform in ("AgX", "Filmic", "Standard"):
+        try:
+            view_settings.view_transform = transform
+            print(f"  [CM] View Transform: {transform}")
+            break
+        except Exception:
+            continue
 
     for look in (
-        'AgX - Very High Contrast', 'Very High Contrast',
-        'AgX - High Contrast', 'High Contrast',
-        'AgX - Base Contrast', 'Base Contrast', 'None'
+        "AgX - High Contrast",
+        "AgX - Base Contrast",
+        "High Contrast",
+        "Medium High Contrast",
+        "None",
     ):
-        if not look_options or look in look_options:
-            try:
-                cm.look = look
-                print(f"  [CM] Look: {look}")
-                break
-            except Exception:
-                continue
+        try:
+            view_settings.look = look
+            print(f"  [CM] Look: {look}")
+            break
+        except Exception:
+            continue
 
-    cm.exposure = -1.0
-    cm.gamma = 1.0
-    print(f"  [CM] Exposure={cm.exposure}  Gamma={cm.gamma}")
-    print(f"  [CM] Aktiver Transform: {cm.view_transform}  Look: {cm.look}")
+    view_settings.exposure = -0.35
+    view_settings.gamma = 1.0
+
+    print(
+        f"  [Render] {RENDER_WIDTH}x{RENDER_HEIGHT}, {RENDER_SAMPLES}spp -> {render_out}"
+    )
 
 
 # ── Hauptprogramm ────────────────────────────────────────────
 
 def main():
     mode_label = "PREVIEW" if PREVIEW_MODE else "FINAL"
-    print("\n" + "=" * 55)
+    print("\n" + "=" * 60)
     print(f"  PITOT TUBE – {mode_label}  ({RENDER_WIDTH}x{RENDER_HEIGHT}, {RENDER_SAMPLES}spp)")
-    print("=" * 55)
+    print("=" * 60)
 
     parts_dir = get_parts_dir()
     if not parts_dir:
-        print(f"\n[FEHLER] parts_obj nicht gefunden! MANUAL_PARTS_DIR='{MANUAL_PARTS_DIR}'")
+        print(f"\n[FEHLER] parts_obj nicht gefunden. MANUAL_PARTS_DIR='{MANUAL_PARTS_DIR}'")
         return
 
     render_out = os.path.join(os.path.dirname(parts_dir), f"pitot_render{OUTPUT_SUFFIX}.png")
-    print(f"  STL   : {parts_dir}")
-    print(f"  Output: {render_out}")
+    print(f"  [Input]  {parts_dir}")
+    print(f"  [Output] {render_out}")
 
-    # ── Szene komplett leeren ────────────────────────────────
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete()
+    cleanup_scene()
+    materials = build_materials()
 
-    for block in list(bpy.data.meshes):
-        if block.users == 0:
-            bpy.data.meshes.remove(block)
-
-    for block in list(bpy.data.materials):
-        if block.users == 0:
-            bpy.data.materials.remove(block)
-
-    # ── Materialien ─────────────────────────────────────────
-    mat_alu = make_material(
-        "MAT_Aluminum",
-        base_color=(0.78, 0.78, 0.80, 1.0),
-        metallic=1.0,
-        roughness=0.12,
-        coat=0.0,
-    )
-    mat_blk = make_material(
-        "MAT_BlackPaint",
-        base_color=(0.005, 0.005, 0.006, 1.0),
-        metallic=0.0,
-        roughness=0.95,
-        coat=0.0,
-        coat_roughness=1.0,
-    )
-    materials = {"aluminum": mat_alu, "black_paint": mat_blk}
-
-    # ── STL-Import ──────────────────────────────────────────
     print("\nImportiere Teile...")
     objects = []
-    for filename, mat_key, desc in PARTS:
-        fp = os.path.join(parts_dir, filename)
-        if not os.path.exists(fp):
-            print(f"  [SKIP]   {filename}")
+    for filename, material_key, label in PARTS:
+        filepath = os.path.join(parts_dir, filename)
+        if not os.path.exists(filepath):
+            print(f"  [SKIP] {filename}")
             continue
-        obj = import_stl(fp)
-        if not obj:
+
+        obj = import_stl(filepath)
+        if obj is None:
             print(f"  [FEHLER] {filename}")
             continue
-        obj.name = desc
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.shade_smooth()
-        mat = materials[mat_key]
+
+        obj.name = label
+        smooth_object(obj)
         obj.data.materials.clear()
-        obj.data.materials.append(mat)
+        obj.data.materials.append(materials[material_key])
         objects.append(obj)
-        print(f"  [OK]  {desc:<28} → {mat_key}")
+        print(f"  [OK]   {label:<22} -> {material_key}")
 
     if not objects:
         print("\n[FEHLER] Keine Teile importiert.")
         return
 
+    if USE_EXPLODED_VIEW and len(objects) > 1:
+        print("\nExploded View...")
+        layout_exploded(objects, axis=EXPLODE_AXIS, gap=EXPLODE_GAP)
+
     print("\nScene setup...")
     bounds = compute_bounds(objects)
-    if bounds:
-        cx, cy, cz, diag, zmin = bounds
-        setup_lighting(cx, cy, cz, diag)
-        setup_camera(cx, cy, cz, diag, zmin)
-    else:
-        setup_lighting()
-        print("  [WARN] Bounds konnten nicht berechnet werden – Standardbeleuchtung")
+    if bounds is None:
+        print("[FEHLER] Bounding-Box konnte nicht bestimmt werden.")
+        return
+
+    center, size, _, _ = bounds
+    setup_lighting(center.x, center.y, center.z, max(size.x, size.y, size.z))
+    setup_camera(bounds)
     setup_render(render_out)
 
-    print(f"\n{'=' * 55}")
+    print("\n" + "=" * 60)
     print("  Rendering...")
-    print(f"{'=' * 55}\n")
+    print("=" * 60 + "\n")
     bpy.ops.render.render(write_still=True)
-    print(f"\n[FERTIG] → {render_out}")
+    print(f"\n[FERTIG] -> {render_out}")
 
 
 main()
